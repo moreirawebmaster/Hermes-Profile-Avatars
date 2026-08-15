@@ -2,13 +2,10 @@
  * Hermes Profile Avatars — real character avatars everywhere the app shows
  * profile initials (kanban card assignees, session sidebar profile chips).
  *
- * How it works: watches the DOM (MutationObserver) for the two identity marks
- * the core renders as initials:
- *   - kanban <Avatar>:      span[title="<profile>"] with the initials text
- *   - session ProfileGlyph: span[aria-label="Profile: <profile>"]
- * and swaps them for the profile's real avatar (profiles.get_asset) when one
- * exists. Falls back to the original initial chip otherwise. No core patches,
- * no rebuild — plain desktop plugin, hot-reloaded by the app.
+ * How it works: watches the DOM (MutationObserver) for the identity marks the
+ * core renders as initials, and swaps them for the profile's real avatar
+ * (profiles.get_asset) when one exists. Also injects the default profile's
+ * avatar on session rows, where the core deliberately renders NO chip at all.
  *
  * Install:  git clone … ~/.hermes/desktop-plugins/profile-avatars
  * Reload:   ⌘K → "Reload desktop plugins"
@@ -20,23 +17,25 @@ import { host } from '@hermes/plugin-sdk'
 
 const ID = 'profile-avatars'
 
-// ── avatar cache ────────────────────────────────────────────────────────────
-// profile name -> data URL (or null when the profile has no avatar).
+// ── avatar cache (TTL so transient gateway misses get retried) ─────────────
+// name -> { data: string|null, at: number }
 const avatarCache = new Map()
 const avatarInflight = new Set()
+const CACHE_TTL_MS = 30_000
 
 async function fetchAvatar(name) {
-  if (avatarCache.has(name)) return avatarCache.get(name)
+  const hit = avatarCache.get(name)
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.data
   if (avatarInflight.has(name)) return null
 
   avatarInflight.add(name)
   try {
     const res = await host.request('profiles.get_asset', { name, asset: 'avatar' })
     const data = res?.found && res.data ? res.data : null
-    avatarCache.set(name, data)
+    avatarCache.set(name, { data, at: Date.now() })
     return data
   } catch {
-    avatarCache.set(name, null)
+    avatarCache.set(name, { data: null, at: Date.now() })
     return null
   } finally {
     avatarInflight.delete(name)
@@ -69,23 +68,10 @@ function isGlyphContainer(el) {
   return typeof cls === 'string' && /rounded-full|rounded-\[3px\]|place-items-center/.test(cls)
 }
 
-// Elements we've already processed — the MutationObserver re-fires a lot.
+// Elements we've already swapped (not "attempted" — failed ones retry via TTL).
 const swapped = new WeakSet()
 
-/** Swap one element (initials) for an avatar <img>. Returns true if swapped. */
-async function swapIfAvatar(el) {
-  if (swapped.has(el)) return
-  const name = profileNameOf(el)
-  if (!name) return
-
-  const avatar = await fetchAvatar(name)
-  if (!avatar) {
-    swapped.add(el) // no avatar — don't re-probe every mutation
-    return
-  }
-
-  // Keep the chip's visual footprint: inherit size from the current element.
-  const size = el.style.height || '1.25rem'
+function makeAvatarImg(name, avatar, size) {
   const img = document.createElement('img')
   img.src = avatar
   img.alt = name
@@ -97,14 +83,81 @@ async function swapIfAvatar(el) {
   img.style.objectFit = 'cover'
   img.style.display = 'inline-block'
   img.style.flexShrink = '0'
-  // Keep the parent grid centering working.
   img.setAttribute('draggable', 'false')
-
-  el.replaceWith(img)
-  swapped.add(img)
+  return img
 }
 
-/** Scan the whole document for candidate glyphs (initial pass + re-scans). */
+/** Swap one element (initials) for an avatar <img>. Returns true if swapped. */
+async function swapIfAvatar(el) {
+  if (swapped.has(el)) return
+  const name = profileNameOf(el)
+  if (!name) return
+
+  const avatar = await fetchAvatar(name)
+  if (!avatar) return // retry on the next scan (TTL)
+
+  const size = el.style.height || '1.25rem'
+  el.replaceWith(makeAvatarImg(name, avatar, size))
+  swapped.add(el)
+}
+
+// ── default-profile injection on session rows ───────────────────────────────
+// The core renders NO profile chip for the default profile (by design), so
+// "Netero — conselho" rows show a bare bullet. We inject the default avatar
+// into any session row that has no ProfileGlyph, i.e. rows whose session
+// belongs to the default profile (named profiles ALWAYS render a chip).
+const DEFAULT_ATTR = 'data-profile-avatar'
+const defaultAvatar = { data: null, at: 0, inflight: false }
+
+async function getDefaultAvatar() {
+  if (defaultAvatar.data && Date.now() - defaultAvatar.at < CACHE_TTL_MS) return defaultAvatar.data
+  if (defaultAvatar.inflight) return null
+  defaultAvatar.inflight = true
+  try {
+    const res = await host.request('profiles.get_asset', { name: 'default', asset: 'avatar' })
+    defaultAvatar.data = res?.found && res.data ? res.data : null
+    defaultAvatar.at = Date.now()
+    return defaultAvatar.data
+  } catch {
+    return null
+  } finally {
+    defaultAvatar.inflight = false
+  }
+}
+
+/** Inject the default avatar into a session row that lacks a profile chip. */
+function injectDefaultAvatar(row) {
+  if (!(row instanceof HTMLElement)) return
+  if (row.querySelector('[data-profile-avatar]')) return
+  // Rows with a ProfileGlyph already carry a named profile — skip them.
+  if (row.querySelector('[aria-label^="Profile: "]')) return
+
+  const avatar = defaultAvatar.data
+  if (!avatar) return
+
+  // Place it where the trailing slot lives (right-aligned, before the kebab
+  // cluster). Session rows are structured: title line then a trailing flex
+  // slot; find the row's title container and prepend after the dot.
+  const dot = row.querySelector('[data-session-dot], .arc-border, [class*="size-1.5"], [class*="size-2"]')
+  if (!dot) return
+
+  const img = makeAvatarImg('default', avatar, '0.875rem')
+  img.style.marginLeft = '2px'
+  // Insert right after the status dot (bullet).
+  dot.after(img)
+}
+
+/** Session rows: rows inside the session list that are NOT the search input. */
+function sessionRowsOf(root) {
+  const rows = []
+  for (const el of root.querySelectorAll('[data-slot="sidebar"] [data-working], [class*="row-hover"]')) {
+    if (el.closest('[data-slot="sidebar-input"], [data-slot="sidebar-trigger"]')) continue
+    rows.push(el)
+  }
+  return rows
+}
+
+// ── scanning ─────────────────────────────────────────────────────────────────
 function scan(root) {
   // Kanban <Avatar name=…> spans have title=profile + short text.
   const kanbanSpans = root.querySelectorAll('span[title]')
@@ -117,37 +170,52 @@ function scan(root) {
   for (const el of glyphs) {
     void swapIfAvatar(el)
   }
+
+  // Default-profile rows: no chip anywhere -> inject the Netero avatar.
+  const rows = sessionRowsOf(root)
+  for (const row of rows) {
+    injectDefaultAvatar(row)
+  }
 }
 
 let observer = null
+let interval = null
 
 export default {
   id: ID,
   name: 'Profile Avatars',
   register() {
-    // Wait for the DOM to exist, then scan and watch.
     const boot = () => {
       if (!document.body) {
         setTimeout(boot, 200)
         return
       }
 
-      // Initial scan covers already-mounted rows.
+      // Prime the default avatar so injection is synchronous on later scans.
+      void getDefaultAvatar()
+
       scan(document)
 
       if (!observer) {
         observer = new MutationObserver(mutations => {
           let needsScan = false
           for (const m of mutations) {
-            if (m.type !== 'childList') continue
-            if (m.addedNodes && m.addedNodes.length) {
-              needsScan = true
-              break
-            }
+            if (m.type !== 'childList' && m.type !== 'attributes') continue
+            needsScan = true
+            break
           }
           if (needsScan) scan(document)
         })
-        observer.observe(document.body, { childList: true, subtree: true })
+        observer.observe(document.body, { childList: true, subtree: true, attributes: true })
+      }
+
+      // Periodic safety net: catches rows/avatars the observer missed and
+      // retries transient get_asset misses after the TTL window.
+      if (!interval) {
+        interval = setInterval(() => {
+          // Re-arm cached nulls after TTL by dropping stale entries lazily.
+          scan(document)
+        }, 5000)
       }
     }
     boot()

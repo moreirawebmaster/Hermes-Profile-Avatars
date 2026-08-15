@@ -14,6 +14,9 @@ const has = {
   getAsset: /profiles\.get_asset/.test(src),
   kanbanHook: /span\[title\]/.test(src),
   sidebarHook: /aria-label\^="Profile:/.test(src),
+  defaultInjection: /injectDefaultAvatar/.test(src),
+  ttlCache: /CACHE_TTL_MS/.test(src),
+  periodicScan: /setInterval/.test(src),
 }
 console.log('estrutura:', has)
 const ok = Object.values(has).every(Boolean)
