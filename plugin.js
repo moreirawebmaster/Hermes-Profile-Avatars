@@ -125,26 +125,40 @@ async function getDefaultAvatar() {
   }
 }
 
-/** Inject the default avatar into a session row that lacks a profile chip. */
+/** Inject the default avatar into a session row that lacks a profile chip.
+ *  Named profiles render their chip in the trailing [data-row-actions] slot;
+ *  the default profile renders NO chip, so we insert the avatar into that
+ *  same slot — keeping the exact same alignment as every other profile. */
 function injectDefaultAvatar(row) {
   if (!(row instanceof HTMLElement)) return
-  if (row.querySelector('[data-profile-avatar]')) return
   // Rows with a ProfileGlyph already carry a named profile — skip them.
   if (row.querySelector('[aria-label^="Profile: "]')) return
 
   const avatar = defaultAvatar.data
   if (!avatar) return
 
-  // Place it where the trailing slot lives (right-aligned, before the kebab
-  // cluster). Session rows are structured: title line then a trailing flex
-  // slot; find the row's title container and prepend after the dot.
+  const actions = row.querySelector('[data-row-actions]')
   const dot = row.querySelector('[data-session-dot], .arc-border, [class*="size-1.5"], [class*="size-2"]')
-  if (!dot) return
+
+  // Already injected? If it sits inside the actions slot we're done; if it
+  // was placed elsewhere by an older version, MOVE it into the slot so the
+  // alignment matches every other profile.
+  const existing = row.querySelector('[data-profile-avatar]')
+  if (existing) {
+    if (actions && existing.parentElement !== actions) {
+      actions.prepend(existing)
+    }
+    return
+  }
 
   const img = makeAvatarImg('default', avatar, '0.875rem')
-  img.style.marginLeft = '2px'
-  // Insert right after the status dot (bullet).
-  dot.after(img)
+
+  if (actions) {
+    actions.prepend(img)
+  } else if (dot) {
+    // Fallback: no actions slot (rare) — place after the status dot.
+    dot.after(img)
+  }
 }
 
 /** Session rows: rows inside the session list that are NOT the search input. */
