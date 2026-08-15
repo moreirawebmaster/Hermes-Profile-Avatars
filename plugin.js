@@ -7,6 +7,11 @@
  * (profiles.get_asset) when one exists. Also injects the default profile's
  * avatar on session rows, where the core deliberately renders NO chip at all.
  *
+ * SAFETY: every mutation we make is IDEMPOTENT — we never touch an element
+ * that already has the correct structure, and we never rewrite a wrapper we
+ * already created. This prevents observer feedback loops (mutation -> scan ->
+ * mutation) that would freeze the app.
+ *
  * Install:  git clone … ~/.hermes/desktop-plugins/profile-avatars
  * Reload:   ⌘K → "Reload desktop plugins"
  *
@@ -16,6 +21,7 @@
 import { host } from '@hermes/plugin-sdk'
 
 const ID = 'profile-avatars'
+const AVATAR_SIZE = '1.25rem'
 
 // ── avatar cache (TTL so transient gateway misses get retried) ─────────────
 // name -> { data: string|null, at: number }
@@ -96,7 +102,7 @@ async function swapIfAvatar(el) {
   const avatar = await fetchAvatar(name)
   if (!avatar) return // retry on the next scan (TTL)
 
-  const size = el.style.height || '1.25rem'
+  const size = el.style.height || AVATAR_SIZE
   el.replaceWith(makeAvatarImg(name, avatar, size))
   swapped.add(el)
 }
@@ -106,7 +112,6 @@ async function swapIfAvatar(el) {
 // "Netero — conselho" rows show a bare bullet. We inject the default avatar
 // into any session row that has no ProfileGlyph, i.e. rows whose session
 // belongs to the default profile (named profiles ALWAYS render a chip).
-const DEFAULT_ATTR = 'data-profile-avatar'
 const defaultAvatar = { data: null, at: 0, inflight: false }
 
 async function getDefaultAvatar() {
@@ -125,11 +130,21 @@ async function getDefaultAvatar() {
   }
 }
 
-/** Inject the default avatar into a session row that lacks a profile chip.
- *  Named profiles render their chip inside a trailing wrapper span within
- *  [data-row-actions]; the default profile renders NO chip, so we replicate
- *  the exact same markup (wrapper span + img) at the front of that slot —
- *  same size, same gap, same alignment as every other profile. */
+/**
+ * True when the default avatar img is already in the canonical structure:
+ * a <span><img/></span> child of [data-row-actions] with the right size.
+ * Checks structure ONLY — never mutates, so it cannot feed the observer loop.
+ */
+function defaultAvatarAlreadyInjected(row, actions) {
+  const img = row.querySelector('[data-profile-avatar="default"]')
+  if (!img || !(img instanceof HTMLElement)) return false
+  if (img.style.width !== AVATAR_SIZE || img.style.height !== AVATAR_SIZE) return false
+  const parent = img.parentElement
+  // Canonical: img inside a plain <span> that is a direct child of actions.
+  return Boolean(actions && parent && parent.parentElement === actions && parent.tagName === 'SPAN')
+}
+
+/** Inject the default avatar into a session row that lacks a profile chip. */
 function injectDefaultAvatar(row) {
   if (!(row instanceof HTMLElement)) return
   // Rows with a ProfileGlyph already carry a named profile — skip them.
@@ -141,36 +156,26 @@ function injectDefaultAvatar(row) {
   const actions = row.querySelector('[data-row-actions]')
   const dot = row.querySelector('[data-session-dot], .arc-border, [class*="size-1.5"], [class*="size-2"]')
 
-  // Already injected? Normalize it to the EXACT structure named profiles
-  // get: <span><img/></span> as a direct child of [data-row-actions] (the
-  // core's trailing.map wrapper), so the flex gap-1 applies identically.
-  // A hot-reloaded plugin must not leave a stale bare img (v2, no wrapper,
-  // 14px) behind — strip and rebuild the wrapper every scan.
-  const existing = row.querySelector('[data-profile-avatar]')
-  if (existing) {
-    const wrap = existing.parentElement && existing.parentElement !== actions
-      ? existing.parentElement
-      : null
-    // Detach the img from wherever it sits.
-    existing.remove()
-    // If it was already in a wrapper inside actions, reuse that wrapper;
-    // otherwise create a fresh plain span (like the core trailing.map).
-    const holder = wrap && actions && wrap.parentElement === actions ? wrap : document.createElement('span')
-    if (!wrap || holder !== wrap) {
-      holder.appendChild(existing)
-    } else {
-      holder.insertBefore(existing, holder.firstChild)
-    }
-    existing.style.width = '1.25rem'
-    existing.style.height = '1.25rem'
-    existing.style.display = 'inline-block'
-    if (actions && holder.parentElement !== actions) {
-      actions.prepend(holder)
+  // Idempotence guard: if the canonical structure already exists, do NOTHING.
+  // This is what prevents the observer feedback loop.
+  if (defaultAvatarAlreadyInjected(row, actions)) return
+
+  // If an img exists but in a stale position/size, MOVE it into place once.
+  const existing = row.querySelector('[data-profile-avatar="default"]')
+  if (existing && existing instanceof HTMLElement) {
+    existing.style.width = AVATAR_SIZE
+    existing.style.height = AVATAR_SIZE
+    if (actions) {
+      const wrap = document.createElement('span')
+      wrap.appendChild(existing)
+      actions.prepend(wrap)
+    } else if (dot) {
+      dot.after(existing)
     }
     return
   }
 
-  const img = makeAvatarImg('default', avatar, '1.25rem')
+  const img = makeAvatarImg('default', avatar, AVATAR_SIZE)
 
   if (actions) {
     // Plain span — exactly what the core's trailing.map wraps ProfileTag in.
@@ -194,6 +199,8 @@ function sessionRowsOf(root) {
 }
 
 // ── scanning ─────────────────────────────────────────────────────────────────
+let scanScheduled = false
+
 function scan(root) {
   // Kanban <Avatar name=…> spans have title=profile + short text.
   const kanbanSpans = root.querySelectorAll('span[title]')
@@ -212,6 +219,20 @@ function scan(root) {
   for (const row of rows) {
     injectDefaultAvatar(row)
   }
+}
+
+/**
+ * Debounced scan: coalesces a burst of mutations into ONE scan per tick.
+ * Without this, every mutation we make (or the app makes) re-triggers a full
+ * scan synchronously — the exact feedback loop that froze the app.
+ */
+function requestScan() {
+  if (scanScheduled) return
+  scanScheduled = true
+  setTimeout(() => {
+    scanScheduled = false
+    scan(document)
+  }, 150)
 }
 
 let observer = null
@@ -233,14 +254,8 @@ export default {
       scan(document)
 
       if (!observer) {
-        observer = new MutationObserver(mutations => {
-          let needsScan = false
-          for (const m of mutations) {
-            if (m.type !== 'childList' && m.type !== 'attributes') continue
-            needsScan = true
-            break
-          }
-          if (needsScan) scan(document)
+        observer = new MutationObserver(() => {
+          requestScan()
         })
         observer.observe(document.body, { childList: true, subtree: true, attributes: true })
       }
@@ -248,10 +263,7 @@ export default {
       // Periodic safety net: catches rows/avatars the observer missed and
       // retries transient get_asset misses after the TTL window.
       if (!interval) {
-        interval = setInterval(() => {
-          // Re-arm cached nulls after TTL by dropping stale entries lazily.
-          scan(document)
-        }, 5000)
+        interval = setInterval(() => requestScan(), 5000)
       }
     }
     boot()
