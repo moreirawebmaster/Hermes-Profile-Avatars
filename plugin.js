@@ -139,6 +139,44 @@ async function injectParticipantStack(row) {
 // Elements we've already swapped (not "attempted" — failed ones retry via TTL).
 const swapped = new WeakSet()
 
+// ── profile roster cache (display titles for kanban chips) ────────────────
+// name -> { title: string, at: number }
+const rosterCache = new Map()
+let rosterInflight = null
+const ROSTER_TTL_MS = 60_000
+
+/** Fetch profiles.list once per TTL; returns Map<name, title>. */
+async function getRosterTitles() {
+  const now = Date.now()
+  const fresh = [...rosterCache.entries()].filter(([, v]) => now - v.at < ROSTER_TTL_MS)
+  if (fresh.length > 0) return new Map(fresh.map(([k, v]) => [k, v.title]))
+  if (rosterInflight) return rosterInflight
+  rosterInflight = (async () => {
+    const out = new Map()
+    try {
+      const res = await host.request('profiles.list', { include_sessions: false })
+      for (const p of res?.profiles || []) {
+        const meta = p?.ui_meta?.['hermes-bots']
+        const title = meta?.title || p?.description || p?.name || ''
+        rosterCache.set(p.name, { title, at: Date.now() })
+        out.set(p.name, title)
+      }
+    } catch {
+      // fall back to what we have
+    } finally {
+      rosterInflight = null
+    }
+    return out
+  })()
+  return rosterInflight
+}
+
+/** Human label for a profile in the kanban chip (title, else name). */
+async function profileLabel(name) {
+  const titles = await getRosterTitles()
+  return titles.get(name) || name
+}
+
 function makeAvatarImg(name, avatar, size) {
   const img = document.createElement('img')
   img.src = avatar
@@ -165,8 +203,44 @@ async function swapIfAvatar(el) {
   if (!avatar) return // retry on the next scan (TTL)
 
   const size = el.style.height || AVATAR_SIZE
+
+  // Kanban assignee chips (rounded-full span[title]) get avatar + name label
+  // with an ellipsis; sidebar glyphs (aria-label Profile:) keep img only.
+  const isKanbanChip = /rounded-full/.test(el.className || '')
+  if (isKanbanChip) {
+    const label = await profileLabel(name)
+    const chip = document.createElement('span')
+    chip.setAttribute('data-pa-chip', name)
+    chip.style.display = 'inline-flex'
+    chip.style.alignItems = 'center'
+    chip.style.gap = '0.25rem'
+    chip.style.minWidth = '0'
+
+    const img = makeAvatarImg(name, avatar, size)
+    img.style.flexShrink = '0'
+    chip.appendChild(img)
+
+    const text = document.createElement('span')
+    text.textContent = label
+    text.style.fontSize = '0.6875rem'
+    text.style.fontWeight = '500'
+    text.style.color = 'var(--ui-text-secondary)'
+    text.style.lineHeight = '1'
+    text.style.maxWidth = '7.5rem' // ~120px: beyond this, ellipsis
+    text.style.overflow = 'hidden'
+    text.style.textOverflow = 'ellipsis'
+    text.style.whiteSpace = 'nowrap'
+    text.title = label
+    chip.appendChild(text)
+
+    el.replaceWith(chip)
+    swapped.add(el)
+    return true
+  }
+
   el.replaceWith(makeAvatarImg(name, avatar, size))
   swapped.add(el)
+  return true
 }
 
 // ── default-profile injection on session rows ───────────────────────────────

@@ -1,5 +1,7 @@
 # Hermes Profile Avatars
 
+> 🌍 **Read this in:** [English](README.md) · [Português](README.pt-BR.md) · [Español](README.es.md) · [Français](README.fr.md) · [中文](README.zh-CN.md) · [日本語](README.ja.md) · [Italiano](README.it.md)
+
 A [Hermes Agent](https://github.com/NousResearch/hermes-agent) desktop plugin that puts **real profile avatars** everywhere the app normally shows initials — kanban card assignees, the session sidebar profile chips, and agent identity marks.
 
 ![hermes-desktop-plugin](https://img.shields.io/badge/hermes-desktop%20plugin-8b5cf6) ![License: MIT](https://img.shields.io/badge/license-MIT-green)
@@ -32,12 +34,14 @@ Watches the DOM (MutationObserver) for the two identity marks the core renders:
 
 and swaps them for the profile's real avatar via `profiles.get_asset` when one exists. Falls back to the original initial chip otherwise.
 
+**Kanban bonus:** the assignee chip shows the **avatar + profile name** (from `profiles.list` → `ui_meta.hermes-bots.title`), with an ellipsis when the name is too long.
+
 **No core patches. No rebuild. Plain desktop plugin** — hot-reloaded by the app.
 
 ## Install
 
 ```bash
-git clone https://github.com/NousResearch/Hermes-Profile-Avatars ~/.hermes/desktop-plugins/profile-avatars
+git clone https://github.com/moreirawebmaster/Hermes-Profile-Avatars ~/.hermes/desktop-plugins/profile-avatars
 ```
 
 (or drop `plugin.js` into `~/.hermes/desktop-plugins/profile-avatars/`)
