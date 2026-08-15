@@ -134,6 +134,16 @@ async function injectParticipantStack(row) {
   wrap.style.alignItems = 'center'
   wrap.appendChild(img)
   actions.prepend(wrap)
+
+  // The default avatar gets extra breathing room only when it sits ALONE
+  // (see injectDefaultAvatar). Once a participant stack lands, zero that
+  // margin so the stacked row keeps the native tight look — one-shot, the
+  // [data-pa-stack] guard above prevents this from ever running twice.
+  const ownerDefault = actions.querySelector('[data-profile-avatar="default"]')
+  const ownerWrap = ownerDefault && ownerDefault.parentElement
+  if (ownerWrap instanceof HTMLElement && ownerWrap.style.marginRight) {
+    ownerWrap.style.marginRight = '0'
+  }
 }
 
 // Elements we've already swapped (not "attempted" — failed ones retry via TTL).
@@ -243,6 +253,13 @@ function injectDefaultAvatar(row) {
     // Plain span — exactly what the core's trailing.map wraps ProfileTag in.
     const wrap = document.createElement('span')
     wrap.appendChild(img)
+    // Breathing room when ALONE: the core's glyph chip sits 4px (gap-1) from
+    // the timestamp; the injected default avatar needs the same clearance.
+    // When a participant stack lands later it zeroes this margin (see
+    // injectParticipantStack) so stacked rows keep their tight, native look.
+    if (!hasParticipantStack(row)) {
+      wrap.style.marginRight = '0.5rem'
+    }
     actions.prepend(wrap)
   } else if (dot) {
     // Fallback: no actions slot (rare) — place after the status dot.
