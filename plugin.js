@@ -151,7 +151,7 @@ function injectDefaultAvatar(row) {
     return
   }
 
-  const img = makeAvatarImg('default', avatar, '0.875rem')
+  const img = makeAvatarImg('default', avatar, '1.25rem')
 
   if (actions) {
     actions.prepend(img)
