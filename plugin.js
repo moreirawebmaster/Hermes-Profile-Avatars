@@ -66,12 +66,74 @@ function profileNameOf(el) {
   return null
 }
 
+// Same regex the core app uses to detect inter-agent deliveries in message
+// text: "Message from 🤖 Name (@handle): ..." or "[Message from agent 'X']".
+// Group 2 (@handle) is the sender profile; group 1 the display name.
+const AGENT_MESSAGE_RE =
+  /^(?:Message from (?:🤖\s*)?([^:\n(]{1,64}?)(?:\s*\(@([a-z0-9][a-z0-9_-]{0,63})\))?:\s*|\[Message from agent '([^']{1,64})'\]\s*)([\s\S]*)$/u
+
+/** Extract the sender profile handle from an inter-agent message line. */
+function agentHandleOf(text) {
+  if (!text) return null
+  const m = AGENT_MESSAGE_RE.exec(text.trim())
+  if (!m) return null
+  return (m[2] || m[3] || '').trim().toLowerCase() || null
+}
+
 /** The smallest span that is the glyph itself (kanban avatar or glyph chip). */
 function isGlyphContainer(el) {
   if (!(el instanceof HTMLElement)) return false
   if (el.querySelector('img')) return false // already swapped
   const cls = el.className || ''
   return typeof cls === 'string' && /rounded-full|rounded-\[3px\]|place-items-center/.test(cls)
+}
+
+// ── participant stack on session rows ─────────────────────────────────────
+// A session whose first message is "Message from 🤖 X (@x): ..." was started
+// by another agent. We surface X's avatar next to the row's owner chip so
+// every helper that touched the conversation is visible at a glance.
+
+/** True when the row already carries a participant stack (idempotence). */
+function hasParticipantStack(row) {
+  return Boolean(row.querySelector('[data-pa-stack]'))
+}
+
+/**
+ * Add the sender's avatar (from the inter-agent title) to the row's actions
+ * slot, before the owner chip, overlapping it by a few px. Only fires when
+ * the title names an agent AND that agent differs from the row's owner —
+ * and only once per row ([data-pa-stack] guard).
+ */
+async function injectParticipantStack(row) {
+  if (!(row instanceof HTMLElement)) return
+  if (hasParticipantStack(row)) return
+
+  const titleEl = row.querySelector('.hover-marquee-inner')
+  if (!titleEl) return
+  const handle = agentHandleOf(titleEl.textContent || '')
+  if (!handle) return
+
+  // Owner profile: the row's ProfileGlyph (or default) already in actions.
+  const actions = row.querySelector('[data-row-actions]')
+  if (!actions) return
+  const ownerImg = actions.querySelector('[data-profile-avatar]')
+  const owner = ownerImg ? (ownerImg.getAttribute('data-profile-avatar') || '').toLowerCase() : null
+  if (!owner || owner === handle) return
+
+  const avatar = await fetchAvatar(handle)
+  if (!avatar) return
+
+  const img = makeAvatarImg(handle, avatar, AVATAR_SIZE)
+  img.style.marginRight = '-0.375rem' // overlap the owner chip by 6px
+  img.style.boxShadow = '0 0 0 2px var(--ui-editor-bg, #0b0b0f)'
+  img.setAttribute('data-pa-stack', 'true')
+
+  const wrap = document.createElement('span')
+  wrap.setAttribute('data-pa-stack', 'true')
+  wrap.style.display = 'inline-flex'
+  wrap.style.alignItems = 'center'
+  wrap.appendChild(img)
+  actions.prepend(wrap)
 }
 
 // Elements we've already swapped (not "attempted" — failed ones retry via TTL).
@@ -218,6 +280,8 @@ function scan(root) {
   const rows = sessionRowsOf(root)
   for (const row of rows) {
     injectDefaultAvatar(row)
+    // Inter-agent sessions: surface the sender's avatar next to the owner.
+    void injectParticipantStack(row)
   }
 }
 

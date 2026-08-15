@@ -15,6 +15,8 @@ const has = {
   kanbanHook: /span\[title\]/.test(src),
   sidebarHook: /aria-label\^="Profile:/.test(src),
   defaultInjection: /injectDefaultAvatar/.test(src),
+  participantStack: /injectParticipantStack/.test(src),
+  agentRegex: /Message from/.test(src),
   ttlCache: /CACHE_TTL_MS/.test(src),
   periodicScan: /setInterval/.test(src),
 }
