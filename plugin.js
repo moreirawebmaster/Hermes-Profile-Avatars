@@ -126,9 +126,10 @@ async function getDefaultAvatar() {
 }
 
 /** Inject the default avatar into a session row that lacks a profile chip.
- *  Named profiles render their chip in the trailing [data-row-actions] slot;
- *  the default profile renders NO chip, so we insert the avatar into that
- *  same slot — keeping the exact same alignment as every other profile. */
+ *  Named profiles render their chip inside a trailing wrapper span within
+ *  [data-row-actions]; the default profile renders NO chip, so we replicate
+ *  the exact same markup (wrapper span + img) at the front of that slot —
+ *  same size, same gap, same alignment as every other profile. */
 function injectDefaultAvatar(row) {
   if (!(row instanceof HTMLElement)) return
   // Rows with a ProfileGlyph already carry a named profile — skip them.
@@ -140,13 +141,18 @@ function injectDefaultAvatar(row) {
   const actions = row.querySelector('[data-row-actions]')
   const dot = row.querySelector('[data-session-dot], .arc-border, [class*="size-1.5"], [class*="size-2"]')
 
-  // Already injected? If it sits inside the actions slot we're done; if it
-  // was placed elsewhere by an older version, MOVE it into the slot so the
-  // alignment matches every other profile.
+  // Already injected? Ensure it sits in the actions slot AND has the
+  // current size — a hot-reloaded plugin must not leave a stale img
+  // from an older version (14px vs 20px) behind.
   const existing = row.querySelector('[data-profile-avatar]')
   if (existing) {
+    existing.style.width = '1.25rem'
+    existing.style.height = '1.25rem'
     if (actions && existing.parentElement !== actions) {
-      actions.prepend(existing)
+      const wrap = document.createElement('span')
+      wrap.className = 'inline-flex justify-end'
+      actions.prepend(wrap)
+      wrap.appendChild(existing)
     }
     return
   }
@@ -154,7 +160,11 @@ function injectDefaultAvatar(row) {
   const img = makeAvatarImg('default', avatar, '1.25rem')
 
   if (actions) {
-    actions.prepend(img)
+    // Same wrapper the core gives every ProfileTag: inline-flex, right-aligned.
+    const wrap = document.createElement('span')
+    wrap.className = 'inline-flex justify-end'
+    wrap.appendChild(img)
+    actions.prepend(wrap)
   } else if (dot) {
     // Fallback: no actions slot (rare) — place after the status dot.
     dot.after(img)
