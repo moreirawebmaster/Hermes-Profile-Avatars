@@ -4,6 +4,14 @@ A [Hermes Agent](https://github.com/NousResearch/hermes-agent) desktop plugin th
 
 ![hermes-desktop-plugin](https://img.shields.io/badge/hermes-desktop%20plugin-8b5cf6) ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
+## Screenshots
+
+Real avatars in the session sidebar (owner chips + inter-agent participant stack) and kanban card assignees — titles blurred to keep conversation names private:
+
+![Session sidebar with real avatars](screenshots/sidebar-avatars.png)
+
+![Kanban cards with real assignee avatars](screenshots/kanban-avatars.png)
+
 ## Problem
 
 Hermes shows a profile's identity as a **colored initial chip** (`K`, `G`, `I`, …) in two core surfaces:
