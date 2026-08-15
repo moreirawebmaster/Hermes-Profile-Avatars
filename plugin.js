@@ -141,18 +141,31 @@ function injectDefaultAvatar(row) {
   const actions = row.querySelector('[data-row-actions]')
   const dot = row.querySelector('[data-session-dot], .arc-border, [class*="size-1.5"], [class*="size-2"]')
 
-  // Already injected? Ensure it sits in the actions slot AND has the
-  // current size — a hot-reloaded plugin must not leave a stale img
-  // from an older version (14px vs 20px) behind.
+  // Already injected? Normalize it to the EXACT structure named profiles
+  // get: <span><img/></span> as a direct child of [data-row-actions] (the
+  // core's trailing.map wrapper), so the flex gap-1 applies identically.
+  // A hot-reloaded plugin must not leave a stale bare img (v2, no wrapper,
+  // 14px) behind — strip and rebuild the wrapper every scan.
   const existing = row.querySelector('[data-profile-avatar]')
   if (existing) {
+    const wrap = existing.parentElement && existing.parentElement !== actions
+      ? existing.parentElement
+      : null
+    // Detach the img from wherever it sits.
+    existing.remove()
+    // If it was already in a wrapper inside actions, reuse that wrapper;
+    // otherwise create a fresh plain span (like the core trailing.map).
+    const holder = wrap && actions && wrap.parentElement === actions ? wrap : document.createElement('span')
+    if (!wrap || holder !== wrap) {
+      holder.appendChild(existing)
+    } else {
+      holder.insertBefore(existing, holder.firstChild)
+    }
     existing.style.width = '1.25rem'
     existing.style.height = '1.25rem'
-    if (actions && existing.parentElement !== actions) {
-      const wrap = document.createElement('span')
-      wrap.className = 'inline-flex justify-end'
-      actions.prepend(wrap)
-      wrap.appendChild(existing)
+    existing.style.display = 'inline-block'
+    if (actions && holder.parentElement !== actions) {
+      actions.prepend(holder)
     }
     return
   }
@@ -160,9 +173,8 @@ function injectDefaultAvatar(row) {
   const img = makeAvatarImg('default', avatar, '1.25rem')
 
   if (actions) {
-    // Same wrapper the core gives every ProfileTag: inline-flex, right-aligned.
+    // Plain span — exactly what the core's trailing.map wraps ProfileTag in.
     const wrap = document.createElement('span')
-    wrap.className = 'inline-flex justify-end'
     wrap.appendChild(img)
     actions.prepend(wrap)
   } else if (dot) {
