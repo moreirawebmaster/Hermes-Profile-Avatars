@@ -134,16 +134,6 @@ async function injectParticipantStack(row) {
   wrap.style.alignItems = 'center'
   wrap.appendChild(img)
   actions.prepend(wrap)
-
-  // The default avatar gets extra breathing room only when it sits ALONE
-  // (see injectDefaultAvatar). Once a participant stack lands, zero that
-  // margin so the stacked row keeps the native tight look — one-shot, the
-  // [data-pa-stack] guard above prevents this from ever running twice.
-  const ownerDefault = actions.querySelector('[data-profile-avatar="default"]')
-  const ownerWrap = ownerDefault && ownerDefault.parentElement
-  if (ownerWrap instanceof HTMLElement && ownerWrap.style.marginRight) {
-    ownerWrap.style.marginRight = '0'
-  }
 }
 
 // Elements we've already swapped (not "attempted" — failed ones retry via TTL).
@@ -228,9 +218,18 @@ function injectDefaultAvatar(row) {
   const actions = row.querySelector('[data-row-actions]')
   const dot = row.querySelector('[data-session-dot], .arc-border, [class*="size-1.5"], [class*="size-2"]')
 
-  // Idempotence guard: if the canonical structure already exists, do NOTHING.
-  // This is what prevents the observer feedback loop.
-  if (defaultAvatarAlreadyInjected(row, actions)) return
+  // Idempotence guard: if the canonical structure already exists, only strip
+  // a stale marginRight left by an older plugin version (0.5rem experiment),
+  // then do NOTHING else. Setting marginRight to '' when it is already '' is
+  // a no-op for the style object but still a DOM attribute write, so gate it.
+  if (defaultAvatarAlreadyInjected(row, actions)) {
+    const img = row.querySelector('[data-profile-avatar="default"]')
+    const wrap = img && img.parentElement
+    if (wrap instanceof HTMLElement && wrap.style.marginRight) {
+      wrap.style.marginRight = ''
+    }
+    return
+  }
 
   // If an img exists but in a stale position/size, MOVE it into place once.
   const existing = row.querySelector('[data-profile-avatar="default"]')
@@ -251,15 +250,10 @@ function injectDefaultAvatar(row) {
 
   if (actions) {
     // Plain span — exactly what the core's trailing.map wraps ProfileTag in.
+    // NO extra margin: the default avatar must sit exactly like the named
+    // profiles' chips (Meruem, Ging…), sharing the flex gap-1 of the slot.
     const wrap = document.createElement('span')
     wrap.appendChild(img)
-    // Breathing room when ALONE: the core's glyph chip sits 4px (gap-1) from
-    // the timestamp; the injected default avatar needs the same clearance.
-    // When a participant stack lands later it zeroes this margin (see
-    // injectParticipantStack) so stacked rows keep their tight, native look.
-    if (!hasParticipantStack(row)) {
-      wrap.style.marginRight = '0.5rem'
-    }
     actions.prepend(wrap)
   } else if (dot) {
     // Fallback: no actions slot (rare) — place after the status dot.
