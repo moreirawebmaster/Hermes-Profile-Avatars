@@ -1,6 +1,6 @@
 # Hermes Profile Avatars
 
-> 🌍 **Read this in:** [English](README.md) · [Português](README.pt-BR.md) · [Español](README.es.md) · [Français](README.fr.md) · [中文](README.zh-CN.md) · [日本語](README.ja.md) · [Italiano](README.it.md)
+> 🌍 **Read this in:** [English](README.md) · [Português](README.pt-BR.md) · [Español](README.es.md) · [Français](README.fr.md) · [中文](README.zh-CN.md) · [日本語](README.ja.md) · [Italiano](README.it.md) · [Русский](README.ru.md)
 
 A [Hermes Agent](https://github.com/NousResearch/hermes-agent) desktop plugin that puts **real profile avatars** everywhere the app normally shows initials — kanban card assignees, the session sidebar profile chips, and agent identity marks.
 
