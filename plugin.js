@@ -23,34 +23,115 @@ import { host } from '@hermes/plugin-sdk'
 const ID = 'profile-avatars'
 const AVATAR_SIZE = '1.25rem'
 
-// ── avatar cache (TTL so transient gateway misses get retried) ─────────────
+// ── avatar cache ────────────────────────────────────────────────────────────
+// L1: memory, TTL so transient gateway misses get retried  (name -> { data, at })
+// L2: ctx.storage (persists across restarts) — 64px canvas thumbs, so the
+//     FIRST paint after app start already shows avatars; RPC refreshes in the
+//     background (stale-while-revalidate). Each get_asset is a network round
+//     trip to the gateway — on a remote gateway that is seconds of pop-in.
 // name -> { data: string|null, at: number }
 const avatarCache = new Map()
 const avatarInflight = new Set()
 const CACHE_TTL_MS = 30_000
+let pluginCtx = null
+const PERSIST_KEY = 'avatars'
+const THUMB_SIZE = 64
 
-async function fetchAvatar(name) {
-  const hit = avatarCache.get(name)
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.data
-  if (avatarInflight.has(name)) return null
+/** Downscale a data URL to a THUMB_SIZE png so persistence stays tiny. */
+function downscaleDataUrl(dataUrl) {
+  return new Promise(resolve => {
+    try {
+      const img = new Image()
+      img.onload = () => {
+        try {
+          const c = document.createElement('canvas')
+          c.width = THUMB_SIZE
+          c.height = THUMB_SIZE
+          const g = c.getContext('2d')
+          g.drawImage(img, 0, 0, THUMB_SIZE, THUMB_SIZE)
+          resolve(c.toDataURL('image/png'))
+        } catch {
+          resolve(null)
+        }
+      }
+      img.onerror = () => resolve(null)
+      img.src = dataUrl
+    } catch {
+      resolve(null)
+    }
+  })
+}
 
+/** Persist a (thumbnailed) avatar so the next app start paints it instantly. */
+async function persistEntry(name, data) {
+  if (!pluginCtx || !pluginCtx.storage) return
+  const thumb = await downscaleDataUrl(data)
+  if (!thumb) return
+  try {
+    const all = pluginCtx.storage.get(PERSIST_KEY, {}) || {}
+    all[name] = { thumb, at: Date.now() }
+    pluginCtx.storage.set(PERSIST_KEY, all)
+  } catch {
+    // quota or unavailability: persistence is an optimization, never fatal
+  }
+}
+
+async function refreshAvatar(name) {
+  if (avatarInflight.has(name)) return avatarCache.get(name)?.data ?? null
   avatarInflight.add(name)
   try {
     const res = await host.request('profiles.get_asset', { name, asset: 'avatar' })
     const data = res?.found && res.data ? res.data : null
     avatarCache.set(name, { data, at: Date.now() })
+    if (data) void persistEntry(name, data)
     return data
   } catch {
-    avatarCache.set(name, { data: null, at: Date.now() })
+    // keep whatever we had (thumb may still be valid)
+    const prev = avatarCache.get(name)
+    avatarCache.set(name, { data: prev?.data ?? null, at: Date.now() })
     return null
   } finally {
     avatarInflight.delete(name)
   }
 }
 
+async function fetchAvatar(name) {
+  const hit = avatarCache.get(name)
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.data
+
+  // Stale but present → serve it and refresh in the background.
+  if (hit && hit.data) {
+    void refreshAvatar(name)
+    return hit.data
+  }
+
+  // Nothing in memory → try the persistent thumb (instant, no RPC wait).
+  if (!hit && pluginCtx && pluginCtx.storage) {
+    try {
+      const all = pluginCtx.storage.get(PERSIST_KEY, {}) || {}
+      const p = all[name]
+      if (p?.thumb) {
+        avatarCache.set(name, { data: p.thumb, at: Date.now() })
+        void refreshAvatar(name)
+        return p.thumb
+      }
+    } catch {
+      // storage unavailable — fall through to the RPC
+    }
+  }
+
+  return refreshAvatar(name)
+}
+
 // ── DOM matching ────────────────────────────────────────────────────────────
 const KANBAN_TITLE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
-const PROFILE_LABEL_RE = /^Profile:\s*([a-z0-9][a-z0-9_-]{0,63})$/i
+// Localized "Profile: <name>" aria-labels — the core translates this label
+// (en.ts ownedByProfile et al): Profile/Профиль/Profil/Perfil/プロファイル/設定檔…
+const PROFILE_LABEL_RE =
+  /^(?:Profile|Профиль|Profil|Perfil|Profilo|プロファイル|配置文件|設定檔)\s*[:：]\s*([a-z0-9][a-z0-9_-]{0,63})$/iu
+// Fallback for locales we don't enumerate (e.g. Arabic has no colon): accept any
+// label ENDING in a kebab profile name, but only on a short-initial glyph chip.
+const PROFILE_LABEL_TAIL_RE = /(?:^|[\s:：])([a-z0-9][a-z0-9_-]{0,63})$/u
 
 /** Resolve the profile name from a candidate element, or null. */
 function profileNameOf(el) {
@@ -60,10 +141,25 @@ function profileNameOf(el) {
   }
   const label = el.getAttribute && el.getAttribute('aria-label')
   if (label) {
-    const m = PROFILE_LABEL_RE.exec(label)
+    const m = PROFILE_LABEL_RE.exec(label.trim())
     if (m) return m[1]
+    const t = (el.textContent || '').trim()
+    if (t.length > 0 && t.length <= 2) {
+      const g = PROFILE_LABEL_TAIL_RE.exec(label.trim())
+      if (g) return g[1]
+    }
   }
   return null
+}
+
+/** True when the element carries a localized "Profile: <name>" aria-label. */
+function isProfileGlyphLabel(el) {
+  if (!el || !el.getAttribute) return false
+  const s = (el.getAttribute('aria-label') || '').trim()
+  if (!s) return false
+  if (PROFILE_LABEL_RE.test(s)) return true
+  const t = (el.textContent || '').trim()
+  return t.length > 0 && t.length <= 2 && PROFILE_LABEL_TAIL_RE.test(s)
 }
 
 // Same regex the core app uses to detect inter-agent deliveries in message
@@ -193,7 +289,17 @@ function makeAvatarImg(name, avatar, size) {
   return img
 }
 
-/** Swap one element (initials) for an avatar <img>. Returns true if swapped. */
+/**
+ * Swap one element (initials) for an avatar <img>. Returns true if swapped.
+ *
+ * REACT SAFETY: never `replaceWith()` a React-owned node — React keeps a
+ * reference to the node it rendered and on a later reconciliation tries to
+ * update/remove it, which throws
+ * "Failed to execute 'removeChild' on 'Node': the node to be removed is not
+ * a child of this node" and crashes the whole workspace pane. Instead we HIDE
+ * the original (inline display:none, React-owned node stays in the DOM) and
+ * insert our avatar as its NEXT SIBLING, tagged data-pa so re-scans recognise it.
+ */
 async function swapIfAvatar(el) {
   if (swapped.has(el)) return
   const name = profileNameOf(el)
@@ -204,12 +310,22 @@ async function swapIfAvatar(el) {
 
   const size = el.style.height || AVATAR_SIZE
 
+  // Idempotence: if our avatar already sits next to this element (React may
+  // have re-created the original chip), just re-hide the chip and stop.
+  const next = el.nextElementSibling
+  if (next && next.hasAttribute && next.hasAttribute('data-pa')) {
+    if (el.style.display !== 'none') el.style.display = 'none'
+    swapped.add(el)
+    return
+  }
+
   // Kanban assignee chips (rounded-full span[title]) get avatar + name label
   // with an ellipsis; sidebar glyphs (aria-label Profile:) keep img only.
   const isKanbanChip = /rounded-full/.test(el.className || '')
   if (isKanbanChip) {
     const label = await profileLabel(name)
     const chip = document.createElement('span')
+    chip.setAttribute('data-pa', name)
     chip.setAttribute('data-pa-chip', name)
     chip.style.display = 'inline-flex'
     chip.style.alignItems = 'center'
@@ -233,12 +349,16 @@ async function swapIfAvatar(el) {
     text.title = label
     chip.appendChild(text)
 
-    el.replaceWith(chip)
+    el.style.display = 'none'
+    el.insertAdjacentElement('afterend', chip)
     swapped.add(el)
     return true
   }
 
-  el.replaceWith(makeAvatarImg(name, avatar, size))
+  const img = makeAvatarImg(name, avatar, size)
+  img.setAttribute('data-pa', name)
+  el.style.display = 'none'
+  el.insertAdjacentElement('afterend', img)
   swapped.add(el)
   return true
 }
@@ -248,22 +368,16 @@ async function swapIfAvatar(el) {
 // "Netero — conselho" rows show a bare bullet. We inject the default avatar
 // into any session row that has no ProfileGlyph, i.e. rows whose session
 // belongs to the default profile (named profiles ALWAYS render a chip).
-const defaultAvatar = { data: null, at: 0, inflight: false }
+const defaultAvatar = { data: null, at: 0 }
 
+/** Same fetch/cache as any avatar; keeps the sync-read state for injectDefaultAvatar. */
 async function getDefaultAvatar() {
-  if (defaultAvatar.data && Date.now() - defaultAvatar.at < CACHE_TTL_MS) return defaultAvatar.data
-  if (defaultAvatar.inflight) return null
-  defaultAvatar.inflight = true
-  try {
-    const res = await host.request('profiles.get_asset', { name: 'default', asset: 'avatar' })
-    defaultAvatar.data = res?.found && res.data ? res.data : null
+  const data = await fetchAvatar('default')
+  if (data) {
+    defaultAvatar.data = data
     defaultAvatar.at = Date.now()
-    return defaultAvatar.data
-  } catch {
-    return null
-  } finally {
-    defaultAvatar.inflight = false
   }
+  return defaultAvatar.data
 }
 
 /**
@@ -284,7 +398,9 @@ function defaultAvatarAlreadyInjected(row, actions) {
 function injectDefaultAvatar(row) {
   if (!(row instanceof HTMLElement)) return
   // Rows with a ProfileGlyph already carry a named profile — skip them.
-  if (row.querySelector('[aria-label^="Profile: "]')) return
+  for (const el of row.querySelectorAll('[aria-label]')) {
+    if (isProfileGlyphLabel(el)) return
+  }
 
   const avatar = defaultAvatar.data
   if (!avatar) return
@@ -335,6 +451,13 @@ function injectDefaultAvatar(row) {
   }
 }
 
+/** Warm the avatar cache for the whole roster at boot, so the FIRST scan
+ *  already swaps chips instead of popping them in seconds later. */
+async function warmRosterAvatars() {
+  const titles = await getRosterTitles()
+  for (const name of titles.keys()) void fetchAvatar(name)
+}
+
 /** Session rows: rows inside the session list that are NOT the search input. */
 function sessionRowsOf(root) {
   const rows = []
@@ -355,10 +478,11 @@ function scan(root) {
     if (isGlyphContainer(el)) void swapIfAvatar(el)
   }
 
-  // Session sidebar ProfileGlyph chips carry aria-label="Profile: <name>".
-  const glyphs = root.querySelectorAll('[aria-label^="Profile: "]')
+  // Session sidebar ProfileGlyph chips carry a localized "Profile: <name>"
+  // aria-label (en "Profile:", ru "Профиль:", …) — test each labeled element.
+  const glyphs = root.querySelectorAll('[aria-label]')
   for (const el of glyphs) {
-    void swapIfAvatar(el)
+    if (isProfileGlyphLabel(el)) void swapIfAvatar(el)
   }
 
   // Default-profile rows: no chip anywhere -> inject the Netero avatar.
@@ -390,15 +514,18 @@ let interval = null
 export default {
   id: ID,
   name: 'Profile Avatars',
-  register() {
+  register(ctx) {
+    pluginCtx = ctx
     const boot = () => {
       if (!document.body) {
         setTimeout(boot, 200)
         return
       }
 
-      // Prime the default avatar so injection is synchronous on later scans.
+      // Prime the default avatar so injection is synchronous on later scans,
+      // and warm the roster avatars so the first scan already swaps chips.
       void getDefaultAvatar()
+      void warmRosterAvatars()
 
       scan(document)
 
