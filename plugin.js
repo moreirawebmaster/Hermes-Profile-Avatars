@@ -214,7 +214,17 @@ function makeAvatarImg(name, avatar, size) {
   return img
 }
 
-/** Swap one element (initials) for an avatar <img>. Returns true if swapped. */
+/**
+ * Swap one element (initials) for an avatar <img>. Returns true if swapped.
+ *
+ * REACT SAFETY: never `replaceWith()` a React-owned node — React keeps a
+ * reference to the node it rendered and on a later reconciliation tries to
+ * update/remove it, which throws
+ * "Failed to execute 'removeChild' on 'Node': the node to be removed is not
+ * a child of this node" and crashes the whole workspace pane. Instead we HIDE
+ * the original (inline display:none, React-owned node stays in the DOM) and
+ * insert our avatar as its NEXT SIBLING, tagged data-pa so re-scans recognise it.
+ */
 async function swapIfAvatar(el) {
   if (swapped.has(el)) return
   const name = profileNameOf(el)
@@ -225,12 +235,22 @@ async function swapIfAvatar(el) {
 
   const size = el.style.height || AVATAR_SIZE
 
+  // Idempotence: if our avatar already sits next to this element (React may
+  // have re-created the original chip), just re-hide the chip and stop.
+  const next = el.nextElementSibling
+  if (next && next.hasAttribute && next.hasAttribute('data-pa')) {
+    if (el.style.display !== 'none') el.style.display = 'none'
+    swapped.add(el)
+    return
+  }
+
   // Kanban assignee chips (rounded-full span[title]) get avatar + name label
   // with an ellipsis; sidebar glyphs (aria-label Profile:) keep img only.
   const isKanbanChip = /rounded-full/.test(el.className || '')
   if (isKanbanChip) {
     const label = await profileLabel(name)
     const chip = document.createElement('span')
+    chip.setAttribute('data-pa', name)
     chip.setAttribute('data-pa-chip', name)
     chip.style.display = 'inline-flex'
     chip.style.alignItems = 'center'
@@ -254,12 +274,16 @@ async function swapIfAvatar(el) {
     text.title = label
     chip.appendChild(text)
 
-    el.replaceWith(chip)
+    el.style.display = 'none'
+    el.insertAdjacentElement('afterend', chip)
     swapped.add(el)
     return true
   }
 
-  el.replaceWith(makeAvatarImg(name, avatar, size))
+  const img = makeAvatarImg(name, avatar, size)
+  img.setAttribute('data-pa', name)
+  el.style.display = 'none'
+  el.insertAdjacentElement('afterend', img)
   swapped.add(el)
   return true
 }
