@@ -50,7 +50,13 @@ async function fetchAvatar(name) {
 
 // ── DOM matching ────────────────────────────────────────────────────────────
 const KANBAN_TITLE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
-const PROFILE_LABEL_RE = /^Profile:\s*([a-z0-9][a-z0-9_-]{0,63})$/i
+// Localized "Profile: <name>" aria-labels — the core translates this label
+// (i18n key ownedByProfile): Profile/Профиль/Profil/Perfil/プロファイル/設定檔…
+const PROFILE_LABEL_RE =
+  /^(?:Profile|Профиль|Profil|Perfil|Profilo|プロファイル|配置文件|設定檔)\s*[:：]\s*([a-z0-9][a-z0-9_-]{0,63})$/iu
+// Fallback for locales we don't enumerate (e.g. Arabic has no colon): accept any
+// label ENDING in a kebab profile name, but only on a short-initial glyph chip.
+const PROFILE_LABEL_TAIL_RE = /(?:^|[\s:：])([a-z0-9][a-z0-9_-]{0,63})$/u
 
 /** Resolve the profile name from a candidate element, or null. */
 function profileNameOf(el) {
@@ -60,10 +66,25 @@ function profileNameOf(el) {
   }
   const label = el.getAttribute && el.getAttribute('aria-label')
   if (label) {
-    const m = PROFILE_LABEL_RE.exec(label)
+    const m = PROFILE_LABEL_RE.exec(label.trim())
     if (m) return m[1]
+    const t = (el.textContent || '').trim()
+    if (t.length > 0 && t.length <= 2) {
+      const g = PROFILE_LABEL_TAIL_RE.exec(label.trim())
+      if (g) return g[1]
+    }
   }
   return null
+}
+
+/** True when the element carries a localized "Profile: <name>" aria-label. */
+function isProfileGlyphLabel(el) {
+  if (!el || !el.getAttribute) return false
+  const s = (el.getAttribute('aria-label') || '').trim()
+  if (!s) return false
+  if (PROFILE_LABEL_RE.test(s)) return true
+  const t = (el.textContent || '').trim()
+  return t.length > 0 && t.length <= 2 && PROFILE_LABEL_TAIL_RE.test(s)
 }
 
 // Same regex the core app uses to detect inter-agent deliveries in message
@@ -284,7 +305,9 @@ function defaultAvatarAlreadyInjected(row, actions) {
 function injectDefaultAvatar(row) {
   if (!(row instanceof HTMLElement)) return
   // Rows with a ProfileGlyph already carry a named profile — skip them.
-  if (row.querySelector('[aria-label^="Profile: "]')) return
+  for (const el of row.querySelectorAll('[aria-label]')) {
+    if (isProfileGlyphLabel(el)) return
+  }
 
   const avatar = defaultAvatar.data
   if (!avatar) return
@@ -355,10 +378,11 @@ function scan(root) {
     if (isGlyphContainer(el)) void swapIfAvatar(el)
   }
 
-  // Session sidebar ProfileGlyph chips carry aria-label="Profile: <name>".
-  const glyphs = root.querySelectorAll('[aria-label^="Profile: "]')
+  // Session sidebar ProfileGlyph chips carry a localized "Profile: <name>"
+  // aria-label (en "Profile:", ru "Профиль:", …) — test each labeled element.
+  const glyphs = root.querySelectorAll('[aria-label]')
   for (const el of glyphs) {
-    void swapIfAvatar(el)
+    if (isProfileGlyphLabel(el)) void swapIfAvatar(el)
   }
 
   // Default-profile rows: no chip anywhere -> inject the Netero avatar.
